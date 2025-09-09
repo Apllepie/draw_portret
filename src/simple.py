@@ -2,32 +2,46 @@ import cv2
 import mediapipe as mp
 import svgwrite
 
-image = cv2.imread('photos/photo4.jpg')
-if image is None:
-    print("Error: Could not read image.")
-    exit()
+DEFAULT_PHOTOS_DIR = "photos"
+DEFAULT_SVG_DIR = "svg"
+D_PHOTO = "photo4.jpg"
+D_SVG = "edges2.svg"
 
-cv2.imshow('Input Image', image)
+def make_svg(edges):
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = edges.shape
+    dwg = svgwrite.Drawing(f"{DEFAULT_SVG_DIR}/{D_SVG}", size=(w, h))
 
-#cv2.imshow('Grayscale Image', gray_image)
+    for cnt in contours:
+        points = [(int(p[0][0]), int(p[0][1])) for p in cnt]
+        if len(points) > 1:
+            dwg.add(dwg.polyline(points, stroke='black', fill='none', stroke_width=1))
 
-edges = cv2.Canny(gray_image, 100, 200)
-cv2.imshow('Edge Detected Image', edges)
+    dwg.save()
+    print("✅ SVG создан!")
 
-contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def main():
+    image = cv2.imread(f"{DEFAULT_PHOTOS_DIR}/{D_PHOTO}")
+    if image is None:
+        print("Error: Could not read image.")
+        exit()
 
-h, w = edges.shape
-dwg = svgwrite.Drawing("svg/edges2.svg", size=(w, h))
+    cv2.imshow('Input Image', image)
 
-for cnt in contours:
-    points = [(int(p[0][0]), int(p[0][1])) for p in cnt]
-    if len(points) > 1:
-        dwg.add(dwg.polyline(points, stroke='black', fill='none', stroke_width=1))
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-dwg.save()
-print("✅ SVG создан!")
+    #cv2.imshow('Grayscale Image', gray_image)
 
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    blur = cv2.GaussianBlur(gray_image, (5, 5), 0)
+
+    edges = cv2.Canny(blur, 100, 200)
+    cv2.imshow('Edge Detected Image', edges)
+
+    make_svg(edges)
+
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
