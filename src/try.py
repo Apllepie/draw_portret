@@ -4,11 +4,121 @@ import matplotlib.pyplot as plt
 from collections import deque
 
 #params
-photo_path = "photos/photo2.jpg"
-#photo_path = "simple_photos/fish.png"
+#photo_path = "photos/photo2.jpg"
+photo_path = "simple_photos/fish.png"
+
 LS_path = "LS/DRAW.LS"
+
 SHOW_IMAGE = True
 SHAPE_LENGTH_THRESHOLD = 10  # minimum number of points to consider a shape
+
+# Fanuc parameters
+SCALE_FACTOR = 0.1  # scale factor for converting pixels to mm
+Z_UP = 10.0         # pen up height
+Z_DOWN = 0.0        # pen down height
+FEED_RATE = 200     # feed rate mm/sec
+BASE_X = 0.0        # base X position
+BASE_Y = 0.0        # base Y position
+
+def convert_to_fanuc_ls(shape, output_path):
+    """converts the shape points to FANUC LS format and saves to a file"""
+    
+    with open(output_path, 'w') as f:
+        # Заголовок программы
+        f.write("/PROG DRAW\n")
+        f.write("/ATTR\n")
+        f.write("OWNER\t\t= MNEDITOR;\n")
+        f.write("COMMENT\t\t= \"Portrait Drawing\";\n")
+        f.write("PROG_SIZE\t= 0;\n")
+        f.write("CREATE\t\t= DATE 23-09-15  TIME 12:00:00;\n")
+        f.write("MODIFIED\t= DATE 23-09-15  TIME 12:00:00;\n")
+        f.write("FILE_NAME\t= DRAW;\n")
+        f.write("VERSION\t\t= 0;\n")
+        f.write("LINE_COUNT\t= 1000;\n")
+        f.write("MEMORY_SIZE\t= 0;\n")
+        f.write("PROTECT\t\t= READ_WRITE;\n")
+        f.write("TCD:  STACK_SIZE\t= 0,\n")
+        f.write("      TASK_PRIORITY\t= 50,\n")
+        f.write("      TIME_SLICE\t= 0,\n")
+        f.write("      BUSY_LAMP_OFF\t= 0,\n")
+        f.write("      ABORT_REQUEST\t= 0,\n")
+        f.write("      PAUSE_REQUEST\t= 0;\n")
+        f.write("DEFAULT_GROUP\t= 1,*,*,*,*;\n")
+        f.write("CONTROL_CODE\t= 00000000 00000000;\n")
+        f.write("/MN\n")
+        
+        line_num = 1
+        current_shape = []
+        
+        # start position
+        f.write(f"   {line_num}:  !Start position ;\n")
+        line_num += 1
+        f.write(f"   {line_num}:J P[1] {FEED_RATE}% CNT0 ;\n")
+        line_num += 1
+        
+        shape_count = 0
+        
+        for point in shape:
+            if point == "/":
+                if current_shape:
+                    shape_count += 1
+                    f.write(f"   {line_num}:  !Shape {shape_count} ;\n")
+                    line_num += 1
+                    
+                    # going to the first point of the shape with pen up
+                    first_point = current_shape[0]
+                    x = BASE_X + first_point[1] * SCALE_FACTOR
+                    y = BASE_Y + first_point[0] * SCALE_FACTOR
+                    
+                    f.write(f"   {line_num}:L P[{line_num}] {FEED_RATE}mm/sec CNT0 ;\n")
+                    f.write(f"   {line_num}:  !X={x:.1f} Y={y:.1f} Z={Z_UP:.1f} ;\n")
+                    line_num += 1
+
+                    # lowering the pen
+                    f.write(f"   {line_num}:L P[{line_num}] {FEED_RATE//2}mm/sec CNT0 ;\n")
+                    f.write(f"   {line_num}:  !X={x:.1f} Y={y:.1f} Z={Z_DOWN:.1f} ;\n")
+                    line_num += 1
+
+                    # drawing the outline
+                    for i, point_coord in enumerate(current_shape[1:], 1):
+                        x = BASE_X + point_coord[1] * SCALE_FACTOR
+                        y = BASE_Y + point_coord[0] * SCALE_FACTOR
+
+                        f.write(f"   {line_num}:L P[{line_num}] {FEED_RATE//4}mm/sec CNT0 ;\n")
+                        f.write(f"   {line_num}:  !X={x:.1f} Y={y:.1f} Z={Z_DOWN:.1f} ;\n")
+                        line_num += 1
+                        
+                        # blocking too long shapes
+                        if i > 100:
+                            break
+
+                    # lifting the pen
+                    last_point = current_shape[min(100, len(current_shape)-1)]
+                    x = BASE_X + last_point[1] * SCALE_FACTOR
+                    y = BASE_Y + last_point[0] * SCALE_FACTOR
+
+                    f.write(f"   {line_num}:L P[{line_num}] {FEED_RATE//2}mm/sec CNT0 ;\n")
+                    f.write(f"   {line_num}:  !X={x:.1f} Y={y:.1f} Z={Z_UP:.1f} ;\n")
+                    line_num += 1
+                    
+                current_shape = []
+            else:
+                current_shape.append(point)
+
+        # Return to start position
+        f.write(f"   {line_num}:  !Return to start ;\n")
+        line_num += 1
+        f.write(f"   {line_num}:J P[1] {FEED_RATE}% CNT0 ;\n")
+        line_num += 1
+
+        # End of program
+        f.write(f"   {line_num}:  !End of program ;\n")
+        f.write("/POS\n")
+        f.write("/END\n")
+    
+    print(f"FANUC program saved to: {output_path}")
+    print(f"Total shapes processed: {shape_count}")
+
 
 def make_shapes(edge):
     """finds all shapes in the edge image and returns a list of points"""
@@ -109,6 +219,9 @@ def main():
     shape = make_shapes(edge.copy())
     print(f"Total points found: {len([p for p in shape if p != '/'])}")
     check_graphicaly(shape)
+
+    convert_to_fanuc_ls(shape, LS_path)
+    print("✅ FANUC LS file created!")
     
     cv2.waitKey(0)
     cv2.destroyAllWindows()
