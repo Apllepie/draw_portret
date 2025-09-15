@@ -60,7 +60,7 @@ def write_ls_file(all_points):
     ls_line = []
     ls_line.append("/PROG DRAW")
     ls_line.append("/ATTR")
-    ls_line.append("OWNER       = MNEDITOR;")
+    ls_line.append("/OWNER       = MNEDITOR;")
     ls_line.append("/MN")
 
     point_id = 1

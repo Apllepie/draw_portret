@@ -1,6 +1,6 @@
 /PROG DRAW
 /ATTR
-OWNER       = MNEDITOR;
+/OWNER       = MNEDITOR;
 /MN
 1:J P[1] 100% FINE ;
 2:L P[2] 150mm/sec FINE ;

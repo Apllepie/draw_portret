@@ -51,7 +51,7 @@ def plot_path(points, sequence):
             ys.append(y)
 
     plt.figure(figsize=(6, 6))
-    plt.plot(xs, ys, marker="o")
+    plt.plot(xs, ys)
     plt.title("Fanuc LS Path (XY projection)")
     plt.xlabel("X")
     plt.ylabel("Y")

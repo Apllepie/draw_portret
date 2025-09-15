@@ -1,18 +1,18 @@
 import cv2
-import mediapipe as mp
+#import mediapipe as mp
 import svgwrite
 import numpy as np
 
 
-DEFAULT_PHOTOS_DIR = "photos"
-DEFAULT_SVG_DIR = "svg"
-D_PHOTO = "photo4.jpg"
-D_SVG = "edges2.svg"
+# DEFAULT_PHOTOS_DIR = "photos"
+# DEFAULT_SVG_DIR = "svg"
+# D_PHOTO = "photo3.png"
+# D_SVG = "edges2.svg"
 
-# DEFAULT_PHOTOS_DIR = "simple_photos"
-# DEFAULT_SVG_DIR = "simple_svg"
-# D_PHOTO = "fish.png"
-# D_SVG = "fish.svg"
+DEFAULT_PHOTOS_DIR = "simple_photos"
+DEFAULT_SVG_DIR = "simple_svg"
+D_PHOTO = "fish.png"
+D_SVG = "fish.svg"
 
 
 def make_svg(edges):
