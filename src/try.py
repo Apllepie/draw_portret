@@ -1,235 +1,282 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from collections import deque
+import matplotlib.animation as animation
 
-#params
-#photo_path = "photos/photo4.jpg"
-#photo_path = "simple_photos/photo3_with_hat.png"
-photo_path = "simple_photos/fish.png"
+# Parameters
+PHOTO_PATH = "simple_photos/fish.png"
+#PHOTO_PATH = "simple_photos/square.png"
+#PHOTO_PATH = "simple_photos/photo3_with_hat.png"
+LS_PATH = "LS/DRAW.LS"
 
-LS_path = "LS/DRAW.LS"
+# Image processing
+SHAPE_LENGTH_THRESHOLD = 10
+MAX_POINTS_PER_SHAPE = 400
+ARC_STEP_MM = 0.8
+MAX_SEG_LEN_MM = 25.0
+COLLINEAR_ANGLE_DEG = 4.0
 
-SHOW_IMAGE = True
-SHAPE_LENGTH_THRESHOLD = 30  # minimum number of points to consider a shape
+# FANUC parameters
+SCALE_FACTOR = 0.1  # px -> mm
+Z_UP, Z_DOWN = 10.0, 0.0
+FEED_RATE = 200
+BASE_X, BASE_Y = 0.0, 0.0
+UT, UF = 9, 4
 
-# Fanuc parameters
-SCALE_FACTOR = 0.1  # scale factor for converting pixels to mm
-Z_UP = 10.0         # pen up height
-Z_DOWN = 0.0        # pen down height
-FEED_RATE = 200     # feed rate mm/sec
-BASE_X = 0.0        # base X position
-BASE_Y = 0.0        # base Y position
 
-UT = 9
-UF = 4
+def resample_contour(pts, step_px):
+    """Uniform point sampling along arc length."""
+    if len(pts) < 2:
+        return pts
+    
+    result = [pts[0]]
+    accumulated = 0.0
+    
+    for i in range(1, len(pts)):
+        segment = pts[i] - pts[i-1]
+        seg_len = np.linalg.norm(segment)
+        
+        while accumulated + seg_len >= step_px and seg_len > 0:
+            t = (step_px - accumulated) / seg_len
+            new_point = pts[i-1] + segment * t
+            result.append(new_point)
+            pts[i-1] = new_point
+            segment = pts[i] - pts[i-1]
+            seg_len = np.linalg.norm(segment)
+            accumulated = 0.0
+        
+        accumulated += seg_len
+    
+    return np.array(result, dtype=np.float32)
 
-def convert_to_fanuc_ls(shape, output_path):
-    """converts the shape points to FANUC LS format and saves to a file"""
+
+def limit_segment_length(pts, max_len_px):
+    """Splits long segments into parts."""
+    if len(pts) < 2:
+        return pts
+    
+    result = [pts[0]]
+    for i in range(1, len(pts)):
+        p0, p1 = result[-1], pts[i]
+        dist = np.linalg.norm(p1 - p0)
+        
+        if dist <= max_len_px:
+            result.append(p1)
+        else:
+            n_segments = int(np.ceil(dist / max_len_px))
+            for k in range(1, n_segments + 1):
+                result.append(p0 + (p1 - p0) * (k / n_segments))
+    
+    return np.array(result, dtype=np.float32)
+
+
+def merge_collinear(pts, angle_thr_deg):
+    """Merges collinear segments."""
+    if len(pts) <= 2:
+        return pts
+    
+    result = [pts[0]]
+    curr = pts[1]
+    prev_angle = np.arctan2(*(pts[1] - pts[0])[::-1])
+    
+    for i in range(2, len(pts)):
+        angle = np.arctan2(*(pts[i] - curr)[::-1])
+        angle_diff = np.rad2deg(np.arctan2(np.sin(angle - prev_angle), 
+                                           np.cos(angle - prev_angle)))
+        
+        if abs(angle_diff) < angle_thr_deg:
+            curr = pts[i]
+        else:
+            result.append(curr)
+            curr = pts[i]
+            prev_angle = angle
+    
+    result.append(curr)
+    return np.array(result, dtype=np.int32)
+
+
+def extract_contours(edge_image):
+    """Extracts and processes contours."""
+    contours, _ = cv2.findContours(edge_image, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    
+    shapes = []
+    step_px = ARC_STEP_MM / SCALE_FACTOR
+    max_seg_px = MAX_SEG_LEN_MM / SCALE_FACTOR
+    
+    for cnt in contours:
+        if len(cnt) <= SHAPE_LENGTH_THRESHOLD:
+            continue
+        
+        # Process contour
+        pts = cnt[:, 0, :]
+        pts = resample_contour(pts.astype(np.float32), step_px)
+        pts = merge_collinear(pts.astype(np.int32), COLLINEAR_ANGLE_DEG)
+        pts = limit_segment_length(pts.astype(np.float32), max_seg_px).astype(np.int32)
+        
+        # Limit number of points
+        if len(pts) > MAX_POINTS_PER_SHAPE:
+            stride = int(np.ceil(len(pts) / MAX_POINTS_PER_SHAPE))
+            pts = pts[::stride]
+        
+        shapes.extend([(int(y), int(x)) for x, y in pts])
+        shapes.append("/")
+    
+    return shapes
+
+
+def save_fanuc_program(shapes, output_path):
+    """Saves program in FANUC LS format."""
+    positions = []
     
     with open(output_path, 'w') as f:
-        # start of FANUC LS file
-        f.write("/PROG DRAW\n")
-        f.write("/ATTR\n")
-        f.write("OWNER\t\t= MNEDITOR;\n")
-        f.write("COMMENT\t\t= \"Portrait Drawing\";\n")
-        f.write("/MN\n")
+        # Header
+        f.write("/PROG DRAW\n/ATTR\nOWNER\t\t= MNEDITOR;\n")
+        f.write("COMMENT\t\t= \"Portrait Drawing\";\n/MN\n")
         
-        line_num = 1
+        line_num, pos_num, shape_idx = 1, 1, 0
+        f.write(f"   {line_num}:   UFRAME_NUM={UF};\n"); line_num += 1
+        f.write(f"   {line_num}:   UTOOL_NUM={UT};\n"); line_num += 1
+        
+        # Process contours
         current_shape = []
-        pos_ = []
-        pos_num = 1
-        
-        # start position
-        f.write(f"   {line_num}:   UFRAME_NUM=4;\n")
-        line_num += 1
-        f.write(f"   {line_num}:   UTOOL_num=9;\n")
-        line_num += 1
-        # f.write(f"   {line_num}:J P[1] {FEED_RATE}% CNT0 ;\n")
-        # line_num += 1
-        # pos_num += 1
-        
-        shape_count = 0
-        
-        for point in shape:
+        for point in shapes:
             if point == "/":
-                if current_shape:
-                    shape_count += 1
-                    f.write(f"   {line_num}:  !Shape {shape_count} ;\n") # can be removed
-                    line_num += 1
+                if len(current_shape) >= 2:
+                    shape_idx += 1
+                    f.write(f"   {line_num}:  !Shape {shape_idx} ;\n"); line_num += 1
                     
-                    # going to the first point of the shape with pen up
-                    first_point = current_shape[0]
-                    x = BASE_X + first_point[1] * SCALE_FACTOR
-                    y = BASE_Y + first_point[0] * SCALE_FACTOR
+                    # Move to first point + lower pen
+                    y0, x0 = current_shape[0]
+                    x, y = BASE_X + x0 * SCALE_FACTOR, BASE_Y + y0 * SCALE_FACTOR
                     
                     f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE}mm/sec CNT0 ;\n")
-                    pos_.append([x, y, Z_UP])
-                    line_num += 1
-                    pos_num += 1
-
-                    # lowering the pen
-                    f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE//2}mm/sec CNT0 ;\n")
-                    pos_.append([x, y, Z_DOWN])
-                    line_num += 1
-                    pos_num += 1
-
-                    # drawing the outline
-                    for i, point_coord in enumerate(current_shape[1:], 1):
-                        x = BASE_X + point_coord[1] * SCALE_FACTOR
-                        y = BASE_Y + point_coord[0] * SCALE_FACTOR
-
-                        f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE//4}mm/sec CNT0 ;\n")
-                        pos_.append([x, y, Z_DOWN])
-                        line_num += 1
-                        pos_num += 1
-                        
-                        # blocking too long shapes
-                        if i > 100:
-                            break
-
-                    # lifting the pen
-                    last_point = current_shape[min(100, len(current_shape)-1)]
-                    x = BASE_X + last_point[1] * SCALE_FACTOR
-                    y = BASE_Y + last_point[0] * SCALE_FACTOR
-
-                    f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE//2}mm/sec CNT0 ;\n")
-                    pos_.append([x, y, Z_UP])
-                    line_num += 1
-                    pos_num += 1
+                    positions.append([x, y, Z_UP]); line_num += 1; pos_num += 1
                     
+                    f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE//2}mm/sec CNT0 ;\n")
+                    positions.append([x, y, Z_DOWN]); line_num += 1; pos_num += 1
+                    
+                    # Draw contour (starting from second point)
+                    for yy, xx in current_shape[1:]:
+                        x, y = BASE_X + xx * SCALE_FACTOR, BASE_Y + yy * SCALE_FACTOR
+                        f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE//4}mm/sec CNT0 ;\n")
+                        positions.append([x, y, Z_DOWN]); line_num += 1; pos_num += 1
+                    
+                    # Lift pen (no duplicate position)
+                    x_last, y_last = positions[-1][0], positions[-1][1]  # Take last position
+                    f.write(f"   {line_num}:L P[{pos_num}] {FEED_RATE//2}mm/sec CNT0 ;\n")
+                    positions.append([x_last, y_last, Z_UP]); line_num += 1; pos_num += 1
+                
                 current_shape = []
             else:
                 current_shape.append(point)
-
-        # Return to start position
-        f.write(f"   {line_num}:J P[1] {FEED_RATE}% CNT0 ;\n")
-        line_num += 1
-
-        # End of program
-        f.write(f"   {line_num}:  !End of program ;\n")
-        f.write("/POS\n")
-        npos = 1
-        for x, y, z in  pos_:
-            f.write ("P[" + str(npos) + "]{\n")
-            f.write("\tGP1:\n")
-            f.write(f"\t UF : 4, UT : 9,		CONFIG : 'F U T, 0, 0, 0',\n")
-            f.write(f"\t X =     {x:.3f}  mm,	Y =   {y:.3f}  mm,	Z =      {z:.3f}  mm,\n")
-            f.write(f"\t W =    59.855 deg,	P =   -83.452 deg,	R =  -153.620 deg\n")
-            f.write("};\n")
-            npos += 1
+        
+        # Return to start
+        if positions:
+            f.write(f"   {line_num}:J P[1] {FEED_RATE}% CNT0 ;\n"); line_num += 1
+        
+        f.write(f"   {line_num}:  !End of program ;\n/POS\n")
+        
+        # Positions
+        for i, (x, y, z) in enumerate(positions, 1):
+            f.write(f"P[{i}]{{\n\tGP1:\n")
+            f.write(f"\t UF : {UF}, UT : {UT},\tCONFIG : 'F U T, 0, 0, 0',\n")
+            f.write(f"\t X = {x:.3f} mm,\tY = {y:.3f} mm,\tZ = {z:.3f} mm,\n")
+            f.write("\t W = 59.855 deg,\tP = -83.452 deg,\tR = -153.620 deg\n};\n")
         
         f.write("/END\n")
     
-    print(f"FANUC program saved to: {output_path}")
-    print(f"Total shapes processed: {shape_count}")
+    print(f"✅ Program saved: {output_path} ({shape_idx} contours)")
+    return positions
 
 
-def make_shapes(edge):
-    """finds all shapes in the edge image and returns a list of points"""
-    shape = []
-    visited = np.zeros_like(edge, dtype=bool)
-    height, width = edge.shape
-    
-    def bfs(start_x, start_y):
-        """Breadth-First Search to find all connected points of a shape"""
-        current_shape = []
-        queue = deque([(start_x, start_y)])
-        
-        while queue:
-            x, y = queue.popleft()
-            
-            if (x < 0 or x >= height or y < 0 or y >= width or 
-                visited[x, y] or edge[x, y] == 0):
-                continue
-            
-            visited[x, y] = True
-            current_shape.append((x, y))
-            
-            # Check all 8 directions
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx == 0 and dy == 0:
-                        continue
-                    new_x, new_y = x + dx, y + dy
-                    if (0 <= new_x < height and 0 <= new_y < width and 
-                        not visited[new_x, new_y] and edge[new_x, new_y] != 0):
-                        queue.append((new_x, new_y))
-        
-        return current_shape
-
-    # Find all connected components
-    for i in range(height):
-        for j in range(width):
-            if edge[i, j] != 0 and not visited[i, j]:
-                current_shape = bfs(i, j)
-                
-                # Filter out small shapes
-                if len(current_shape) > SHAPE_LENGTH_THRESHOLD:
-                    shape.extend(current_shape)
-                    shape.append("/")
-    
-    return shape
-
-def check_graphicaly(shape):
-    """draws the found shapes using matplotlib"""
-    plt.figure(figsize=(12, 8))
-    
-    x = []
-    y = []
-    colors = plt.cm.tab10(np.linspace(0, 1, 20))
-    figure_n = 0
-    
-    for point in shape:
-        if point == "/":
-            if x and y:
-                color = colors[figure_n % len(colors)]
-                plt.scatter(y, x, s=1, color=color, alpha=0.7 , marker='o')
-                figure_n += 1
-            x = []
-            y = []
-        else:
-            px, py = point
-            x.append(px)
-            y.append(py)
-    
-    if x and y:
-        color = colors[figure_n % len(colors)]
-        plt.scatter(y, x, s=1, color=color, alpha=0.7, marker='o')
-        figure_n += 1
-    
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.title(f"Found {figure_n} shapes")
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-    plt.show()
-    
-    print(f"Total shapes found: {figure_n}")
-
-def main():
-    image = cv2.imread(photo_path, cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        print(f"Error: Unable to load image at {photo_path}")
+def visualize_path(positions, animate=True, interval=20):
+    """Visualizes robot path."""
+    if not positions:
         return
     
-    # blur and edge detection
+    pts = np.array(positions)
+    X, Y, Z = pts[:, 0], pts[:, 1], pts[:, 2]
+    z_threshold = (Z_DOWN + Z_UP) / 2
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    pad = 5.0
+    ax.set_xlim(X.min() - pad, X.max() + pad)
+    ax.set_ylim(Y.min() - pad, Y.max() + pad)
+    ax.invert_yaxis()
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Robot Path")
+    
+    draw_line, = ax.plot([], [], 'r-', lw=1.8, label="Drawing")
+    travel_line, = ax.plot([], [], 'gray', lw=1.2, ls='--', alpha=0.7, label="Travel")
+    tip, = ax.plot([], [], 'bo', ms=6, label="Tool")
+    ax.legend()
+    
+    draw_x, draw_y, travel_x, travel_y = [], [], [], []
+    
+    # FIXED: segment draws only if BOTH points are pen down
+    segments = [(pts[i, 0], pts[i, 1], pts[i+1, 0], pts[i+1, 1],
+                 pts[i, 2] <= z_threshold and pts[i+1, 2] <= z_threshold)
+                for i in range(len(pts) - 1)]
+    
+    def update(frame):
+        x0, y0, x1, y1, is_draw = segments[frame]
+        
+        if is_draw:
+            # Add break if this is start of new line
+            if draw_x and (frame == 0 or not segments[frame-1][4]):
+                draw_x.append(np.nan)
+                draw_y.append(np.nan)
+            draw_x.extend([x0, x1])
+            draw_y.extend([y0, y1])
+            draw_line.set_data(draw_x, draw_y)
+        else:
+            # Add break if this is start of new travel
+            if travel_x and frame > 0 and segments[frame-1][4]:
+                travel_x.append(np.nan)
+                travel_y.append(np.nan)
+            travel_x.extend([x0, x1])
+            travel_y.extend([y0, y1])
+            travel_line.set_data(travel_x, travel_y)
+        
+        tip.set_data([x1], [y1])
+        return draw_line, travel_line, tip
+    
+    if animate:
+        anim = animation.FuncAnimation(fig, update, frames=len(segments), 
+                                      interval=interval, blit=True, repeat=False)
+        plt.show()
+    else:
+        # Non-animated mode - draw everything at once
+        for frame in range(len(segments)):
+            update(frame)
+        plt.show()
+
+
+def main():
+    # Load and process image
+    image = cv2.imread(PHOTO_PATH, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        print(f"❌ Error loading: {PHOTO_PATH}")
+        return
+    
     image = cv2.GaussianBlur(image, (3, 3), 0)
-    edge = cv2.Canny(image, 50, 150)
-
-    if SHOW_IMAGE:
-        cv2.imshow("Original", image)
-        cv2.imshow("Edges", edge)
-
-    shape = make_shapes(edge.copy())
-    print(f"Total points found: {len([p for p in shape if p != '/'])}")
-    check_graphicaly(shape)
-
-    convert_to_fanuc_ls(shape, LS_path)
-    print("✅ FANUC LS file created!")
+    edges = cv2.Canny(image, 50, 150)
+    
+    cv2.imshow("Original", image)
+    cv2.imshow("Contours", edges)
+    
+    # Generate trajectory
+    shapes = extract_contours(edges)
+    print(f"Found points: {len([p for p in shapes if p != '/'])}")
+    
+    # Save and visualize
+    positions = save_fanuc_program(shapes, LS_PATH)
+    visualize_path(positions)
     
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
